@@ -1115,6 +1115,16 @@ class BufferFeeder:
         # Defense-Patches P7-72/73/77B greifen nicht weil Gap<5s.
         self._last_target_speed = 0.0
 
+        # Hotfix 12 Diagnostic (Hardware-Crash 2026-05-14 Run 2 c=22 i=0).
+        # Wurzel-Hypothese (DIAG-Analyse Z.10680-10725): "3+ Mode-Wechsel
+        # in <1.5s durch HALL3-Edge + vel-Drop". Erweiterte DIAG um
+        # Wurzel zwingend zu beweisen (oder widerlegen): submit-mode-
+        # history (letzte 3), HALL-State-Snapshot beim Submit, HALL-
+        # Edge-Detection. Pure Instrumentation, kein Verhaltens-Fix.
+        import collections as _collections
+        self._submit_mode_history = _collections.deque(maxlen=3)
+        self._last_hall_state_diag = (False, False, False)
+
         # Stepper enable handle (resolved at connect)
         self._stepper_enable = None
 
@@ -3857,14 +3867,36 @@ class BufferFeeder:
         # vermeiden — auf Drucker ist das Flag aktiv (buffer_metrics-
         # Zeilen sichtbar in klippy.log).
         if forced_t0 is not None and self.buffer_debug_metrics:
+            # Hotfix 12 Diagnostic: erweiterter DIAG mit HALL-Snapshot
+            # und Mode-History fuer Wurzel-3-Analyse.
+            mode_str = ('STREAM' if streaming
+                        else 'STALE' if stale_anchor
+                        else 'NORMAL')
+            self._submit_mode_history.append(mode_str)
+            mode_hist = '/'.join(self._submit_mode_history)
+            hall_snap = "H3:%d/H2:%d/H1:%d" % (
+                int(self.hall_empty), int(self.hall_full),
+                int(self.hall_overflow))
+            # HALL-Edge-Detection: hat sich HALL-State seit letztem
+            # Submit geaendert?
+            cur_hall = (self.hall_empty, self.hall_full, self.hall_overflow)
+            hall_edge = ""
+            if cur_hall != self._last_hall_state_diag:
+                hall_edge = " [HALL-EDGE: %s->%s]" % (
+                    "H3=%d,H2=%d,H1=%d" % tuple(
+                        int(x) for x in self._last_hall_state_diag),
+                    "H3=%d,H2=%d,H1=%d" % tuple(int(x) for x in cur_hall))
+            self._last_hall_state_diag = cur_hall
             logging.info(
                 "buffer_feeder DIAG submit: forced_t0=%.3f t0=%.3f "
                 "mcu_now=%.3f lme=%.3f en=%.3f was_primed=%s "
                 "stale_anchor=%s need_reprime=%s streaming=%s "
-                "dist=%.2f speed=%.2f cmd_pos=%.2f",
+                "dist=%.2f speed=%.2f cmd_pos=%.2f "
+                "hall=%s mode_hist=%s%s",
                 forced_t0, t0, mcu_now, self._last_move_end_time, en,
                 was_primed, stale_anchor, need_reprime, streaming,
-                signed_distance, speed, self._commanded_pos)
+                signed_distance, speed, self._commanded_pos,
+                hall_snap, mode_hist, hall_edge)
 
         distance = abs(signed_distance)
         direction = 1.0 if signed_distance > 0 else -1.0
