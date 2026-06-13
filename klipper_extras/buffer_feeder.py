@@ -3139,7 +3139,36 @@ class BufferFeeder:
         # toolhead.flush_step_generation() bei Host-Last 100ms+
         # blockieren — ein vor dem Flush gelesenes mcu_now waere als
         # t0-Floor bereits abgelaufen (Timer too close).
+        mcu_now_pre = mcu_now  # Diagnose Issue #50: Wert vor Reprime
         mcu_now = mcu.estimated_print_time(self.reactor.monotonic())
+
+        # Diagnose-Build Issue #50 (Regel #11a, NICHT Production).
+        # Voller Anchor-Input-State am Submit + Queue-Ende. min_interval=
+        # 0.0 damit im OVERFLOW↔LOAD-Sturm keine Events verloren gehen.
+        #
+        # Port auf 93e8df5: Das Event stand urspruenglich VOR
+        # _enable_stepper(). Upstream liest mcu_now danach neu (Codex
+        # 2026-07-14) und rechnet t0 mit dem frischen Wert. An der alten
+        # Stelle haette das Event ein mcu_now geloggt, das gar nicht die
+        # t0-Grundlage ist — die Abweichung liegt laut Upstream-Kommentar
+        # bei 100ms+, also genau in unserer Messgroesse. Deshalb hier
+        # unten; reprime_dt weist die Luecke zusaetzlich explizit aus.
+        # siehe tests/test_diag_load_overflow.py::
+        #   test_diag_submit_logs_the_mcu_now_used_for_t0
+        cur_end = (self._current_move.get('end_time')
+                   if self._current_move is not None else None)
+        self._debug_event(
+            'diag_submit',
+            "state=%s dist=%.3f speed=%.3f forced_t0=%s streaming=%s "
+            "mcu_now=%.6f mcu_now_pre=%.6f reprime_dt=%+.6f lme=%.6f "
+            "en=%.6f gap=%+.6f was_primed=%s need_reprime=%s cur_end=%s",
+            self._state, signed_distance, speed,
+            ("%.6f" % forced_t0) if forced_t0 is not None else "None",
+            streaming, mcu_now, mcu_now_pre, mcu_now - mcu_now_pre,
+            self._last_move_end_time,
+            self._last_enable_schedule_time, gap, was_primed, need_reprime,
+            ("%.6f" % cur_end) if cur_end is not None else "None",
+            min_interval=0.0)
 
         t0 = self._compute_t0_anchor(
             forced_t0, mcu_now, was_primed, need_reprime, streaming)
@@ -3299,6 +3328,26 @@ class BufferFeeder:
             # "Invalid sequence"-Klasse (Step vor last_step_clock).
             # Der P7-77-B-Far-Future-Skip unten bleibt unveraendert.
             t0 = max(t0, mcu_now + self.lead_time)
+        # Diagnose-Build Issue #50 (Regel #11a, NICHT Production). th_time
+        # ist die Anchor-Quelle im Recovery-Pfad. Wenn sie unter Tight-
+        # Cycling hinter dem buffer-eigenen Queue-Ende lagged, landet t0
+        # hinter der Queue -> i=0-Crash. min_interval=0.0 (Sturm).
+        # Port auf 93e8df5: curend_floor (d9625a5 F1) und mode
+        # ergaenzt. Der Floor zieht t0 hinter _current_move['end_time']
+        # — genau die Groesse, deren Fehlen wir als Wurzel vermuten.
+        # Ohne beide Felder ist im Log nicht unterscheidbar, welcher
+        # Floor t0 gesetzt hat. Das Event steht bewusst NACH dem
+        # silent-Floor (089feec), sonst waere der geloggte t0 nicht der
+        # finale. siehe tests/test_diag_load_overflow.py::
+        #   test_diag_anchor_logs_current_end_floor
+        #   test_diag_anchor_logs_final_t0_after_silent_floor
+        self._debug_event(
+            'diag_anchor',
+            "firstchunk th_time=%.6f lead=%.6f lme=%.6f en=%.6f "
+            "mcu_now=%.6f curend_floor=%.6f mode=%s t0=%.6f t0-th=%+.6f",
+            th_time, self.lead_time, self._last_move_end_time, en, mcu_now,
+            current_end_floor, self.idle_anchor_mode,
+            t0, t0 - th_time, min_interval=0.0)
         if t0 > mcu_now + MAX_T0_LOOKAHEAD_S:
             # th_time is far ahead (active print with filled toolhead
             # queue). Clamping to mcu_now would land BEFORE
@@ -3350,6 +3399,25 @@ class BufferFeeder:
 
     def _append_trapezoid_and_record(self, t0, signed_distance, speed):
         """Compute the trapezoid profile, append to trapq, update state."""
+        # Diagnose-Build Issue #50 (Regel #11a, NICHT Production). Direkt
+        # vor trapq_append: finaler t0 gegen lme und cur_end (= noch
+        # gequeuete Steps des von halt_motion getrunkten Vorgänger-
+        # Chunks). t0-curend < 0 ist der direkte Beleg "Submit landet
+        # hinter der Queue" -> i=0 c=N stepcompress-Crash.
+        _cur_end = (self._current_move.get('end_time')
+                    if self._current_move is not None else None)
+        _mcu = self.stepper.get_mcu()
+        _mcu_now = _mcu.estimated_print_time(self.reactor.monotonic())
+        self._debug_event(
+            'diag_append',
+            "t0=%.6f lme_in=%.6f cur_end=%s mcu_now=%.6f t0-lme=%+.6f "
+            "t0-curend=%s commanded_pos=%.3f",
+            t0, self._last_move_end_time,
+            ("%.6f" % _cur_end) if _cur_end is not None else "None",
+            _mcu_now, t0 - self._last_move_end_time,
+            ("%+.6f" % (t0 - _cur_end)) if _cur_end is not None else "None",
+            self._commanded_pos, min_interval=0.0)
+
         distance = abs(signed_distance)
         direction = 1.0 if signed_distance > 0 else -1.0
 
