@@ -3310,8 +3310,41 @@ class BufferFeeder:
 
         if self._last_move_end_time > mcu_now + self.lead_time:
             # Streaming abut path: previous chunk is still in the future.
+            _abut_t0 = max(self._last_move_end_time, en)
+            # Diagnose-Build Issue #50 (Regel #11a, NICHT Production).
+            # Dritter t0-Zweig, und der einzige OHNE current_end_floor:
+            # d9625a5 F1 hat den Floor nur in den forced_t0- und den
+            # First-Chunk-Zweig gelegt. Hier bleibt es bei
+            # t0 = max(lme, en) — ein Anchor kann also weiterhin vor
+            # _current_move['end_time'] landen, also hinter den bereits
+            # generierten Steps (last_step_clock) -> negativer Interval
+            # -> "Invalid sequence" (Crash 2026-06-12 klippy.log
+            # Z.50622). Die Hardware-Messung notierte genau hier
+            # t0-curend == 0.000000, also Nullmarge ohne Reserve.
+            #
+            # floor_short ist der direkte Beleg: True heisst, der Floor
+            # HAETTE gegriffen, wenn dieser Zweig ihn anwenden wuerde.
+            #
+            # Bewusst NUR Instrumentierung, kein Floor: ob der Zweig
+            # unter _halt_motion ueberhaupt erreichbar ist, ist bisher
+            # nur Code-Lesung (der lme-Clamp macht die Bedingung
+            # rechnerisch falsch) — kein Test, kein Log. Ein Floor ohne
+            # Wurzelbeleg wuerde die Frage zudecken statt beantworten.
+            # siehe tests/test_diag_load_overflow.py::
+            #   test_diag_abut_flags_anchor_behind_queue_end
+            _abut_short = (current_end_floor > 0.0
+                           and _abut_t0 < current_end_floor)
+            self._debug_event(
+                'diag_abut',
+                "lme=%.6f en=%.6f mcu_now=%.6f lead=%.6f "
+                "curend_floor=%.6f t0=%.6f t0-curend=%s floor_short=%s",
+                self._last_move_end_time, en, mcu_now, self.lead_time,
+                current_end_floor, _abut_t0,
+                ("%+.6f" % (_abut_t0 - current_end_floor))
+                if current_end_floor > 0.0 else "None",
+                _abut_short, min_interval=0.0)
             return AnchorPlan(
-                t0=max(self._last_move_end_time, en),
+                t0=_abut_t0,
                 enable_floor=en,
             )
 

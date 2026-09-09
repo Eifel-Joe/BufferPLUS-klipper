@@ -258,3 +258,106 @@ def test_diag_anchor_logs_final_t0_after_silent_floor(feeder, caplog):
     # Floor t0 gesetzt hat — curend_floor oder der silent-Floor.
     assert "mode=silent" in diag[0], (
         "idle_anchor_mode fehlt im Event: %s" % diag[0])
+
+
+def test_diag_abut_emits_event_in_streaming_abut_branch(feeder, caplog):
+    """Streaming-Abut-Zweig braucht einen eigenen Event.
+
+    _plan_t0_anchor hat drei t0-liefernde Zweige. Der forced_t0-Zweig und
+    der First-Chunk-Zweig bekamen mit d9625a5 F1 den current_end_floor;
+    der Abut-Zweig (lme > mcu_now + lead) NICHT — er gibt weiterhin
+    t0 = max(lme, en) zurueck. Damit ist er nach dem Update der einzige
+    Pfad, auf dem ein Anchor hinter dem Queue-Ende landen kann.
+
+    Hardware-Messung 2026-06-12 notierte genau dort t0-curend == 0.000000
+    (Nullmarge). diag_append sieht das Delta zwar, weist aber die
+    Zweig-Herkunft nicht aus — im Sturm ist dann nicht zuzuordnen, ob ein
+    negatives Delta aus diesem ungefloorten Zweig stammt."""
+    _enable_diag(feeder)
+    mcu_now = 100.0
+    # lme > mcu_now + lead -> Abut-Zweig; end_time darueber -> der Floor,
+    # den dieser Zweig gerade NICHT anwendet.
+    feeder._last_move_end_time = mcu_now + feeder.lead_time + 0.7
+    feeder._last_enable_schedule_time = 0.0
+    feeder._current_move = {'end_time': feeder._last_move_end_time + 1.0}
+
+    with caplog.at_level(logging.INFO, logger=""):
+        t0 = feeder._compute_t0_anchor(
+            None, mcu_now, was_primed=True, need_reprime=False,
+            streaming=False)
+
+    assert t0 == feeder._last_move_end_time, "Abut-Zweig muss auf lme ankern"
+    diag = [r.getMessage() for r in caplog.records
+            if "diag_abut" in r.getMessage()]
+    assert diag, "diag_abut-Event fehlt. Alle: %s" % [
+        r.getMessage() for r in caplog.records]
+    for field in ("lme=", "en=", "mcu_now=", "lead=", "curend_floor=",
+                  "t0=", "t0-curend=", "floor_short="):
+        assert field in diag[0], "Feld '%s' fehlt: %s" % (field, diag[0])
+
+
+def test_diag_abut_flags_anchor_behind_queue_end(feeder, caplog):
+    """Kernbeweis: t0 < current_end_floor muss als floor_short=True
+    erscheinen — der direkte Beleg, dass der fehlende Floor in diesem
+    Zweig beisst und der Submit hinter der Queue landet."""
+    _enable_diag(feeder)
+    mcu_now = 100.0
+    feeder._last_move_end_time = 101.0          # > mcu_now + lead
+    feeder._last_enable_schedule_time = 0.0
+    feeder._current_move = {'end_time': 102.0}  # Queue-Ende hinter t0
+
+    with caplog.at_level(logging.INFO, logger=""):
+        t0 = feeder._compute_t0_anchor(
+            None, mcu_now, was_primed=True, need_reprime=False,
+            streaming=False)
+
+    assert t0 == 101.0
+    diag = [r.getMessage() for r in caplog.records
+            if "diag_abut" in r.getMessage()]
+    assert diag, "diag_abut-Event fehlt"
+    assert "curend_floor=102.000000" in diag[0], diag[0]
+    assert "t0-curend=-1.000000" in diag[0], (
+        "negatives t0-curend-Delta nicht korrekt geloggt: %s" % diag[0])
+    assert "floor_short=True" in diag[0], (
+        "Anchor hinter Queue-Ende nicht als floor_short markiert: %s"
+        % diag[0])
+
+
+def test_diag_abut_floor_short_false_when_floor_would_not_bite(feeder,
+                                                               caplog):
+    """Gegenprobe: liegt das Queue-Ende vor t0, ist floor_short False.
+
+    Ohne diesen Pin waere ein konstant True gesetztes Flag im Log
+    wertlos — jeder Abut-Submit saehe nach Wurzel aus."""
+    _enable_diag(feeder)
+    mcu_now = 100.0
+    feeder._last_move_end_time = 103.0
+    feeder._last_enable_schedule_time = 0.0
+    feeder._current_move = {'end_time': 101.0}  # vor t0 -> Floor irrelevant
+
+    with caplog.at_level(logging.INFO, logger=""):
+        feeder._compute_t0_anchor(
+            None, mcu_now, was_primed=True, need_reprime=False,
+            streaming=False)
+
+    diag = [r.getMessage() for r in caplog.records
+            if "diag_abut" in r.getMessage()]
+    assert diag, "diag_abut-Event fehlt"
+    assert "floor_short=False" in diag[0], diag[0]
+
+
+def test_diag_abut_silent_when_debug_disabled(feeder, caplog):
+    """Production-no-op: ohne buffer_debug_events kein diag_abut."""
+    feeder.buffer_debug_events = False
+    feeder._startup_grace_done = True
+    feeder._last_move_end_time = 101.0
+    feeder._last_enable_schedule_time = 0.0
+    feeder._current_move = {'end_time': 102.0}
+
+    with caplog.at_level(logging.INFO, logger=""):
+        feeder._compute_t0_anchor(
+            None, 100.0, was_primed=True, need_reprime=False,
+            streaming=False)
+
+    assert not [r for r in caplog.records if "diag_abut" in r.getMessage()], (
+        "diag_abut darf bei buffer_debug_events=False nicht feuern")
