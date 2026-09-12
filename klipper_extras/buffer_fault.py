@@ -65,6 +65,13 @@ class FaultManager:
         self.owner._hall2_start_time = None
         self.owner._hall3_start_time = None
         self.owner._hall3_drop_since = None
+        # H1 (Audit 2026-09-10): Fehlerserie des Flush-Pfads gehoert zu den
+        # Recovery-Flags. Ohne Reset bliebe der Zaehler nach einem
+        # BUFFER_CLEAR_JAM auf dem Limit stehen und der naechste einzelne
+        # Aussetzer wuerde sofort wieder pausieren.
+        # siehe buffer_feeder._note_flush_fault, tests/test_flush_fault_guard.py
+        self.owner._flush_fault_count = 0
+        self.owner._flush_fault_pending = ""
 
     def resume_after_overflow(self):
         owner = self.owner
