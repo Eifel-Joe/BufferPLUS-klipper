@@ -72,6 +72,10 @@ class FaultManager:
         # siehe buffer_feeder._note_flush_fault, tests/test_flush_fault_guard.py
         self.owner._flush_fault_count = 0
         self.owner._flush_fault_pending = ""
+        # Dasselbe fuer die Fehlerserie des Reactor-Ticks (Audit-Befund M2).
+        self.owner._main_tick_fault_count = 0
+        self.owner._main_tick_fault_since = 0.0
+        self.owner._main_tick_fault_last_log = 0.0
 
     def enter_overflow(self):
         owner = self.owner

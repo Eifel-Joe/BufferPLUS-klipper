@@ -90,6 +90,20 @@ FLUSH_FAULT_LIMIT = 3
 FLUSH_FAULT_LOG_BURST = 3
 FLUSH_FAULT_LOG_EVERY = 25
 
+# Schwellen des Tick-Fangnetzes (siehe _main_tick, _note_main_tick_fault).
+# MAIN_TICK_FAULT_SECONDS — wie lange der Fehler ununterbrochen anhalten muss,
+# bevor der Druck pausiert wird. ZEITBASIERT und nicht wie im Flush-Pfad nach
+# drei Fehlern in Folge: der Tick laeuft mit 50 Hz, drei Fehler waeren 60 ms,
+# und ein kurzer Schluckauf (waehrend eines Neustarts kurz fehlendes
+# print_stats etwa) wuerde dann einen laufenden Druck pausieren. Der Flush-Pfad
+# laeuft mit 4-5 Hz, dort sind drei Fehler rund 600 ms — gleiche Politik, an
+# die Taktrate angepasste Schwelle.
+# LOG_BURST/LOG_INTERVAL_S — Drosselung gegen das P7-78-Muster (Issue #59):
+# ungedrosselt erzeugt ein Dauerfehler 50 Tracebacks pro Sekunde.
+MAIN_TICK_FAULT_SECONDS = 1.0
+MAIN_TICK_FAULT_LOG_BURST = 3
+MAIN_TICK_FAULT_LOG_INTERVAL_S = 10.0
+
 
 class BufferFeeder:
     # Klipper-facing adapter and owner of live config/runtime attributes.
@@ -1042,9 +1056,62 @@ class BufferFeeder:
             self._tick_debug_metrics(eventtime)
 
         except Exception:
-            logging.exception("buffer_feeder main_tick error")
+            self._note_main_tick_fault(eventtime)
+        else:
+            # Erfolgreicher Tick beendet eine Fehlerserie. Nur ein
+            # ununterbrochen anhaltender Fehler eskaliert — ein Aussetzer
+            # alle paar Sekunden ist kein Dauerfehler.
+            if self._main_tick_fault_count:
+                self._main_tick_fault_count = 0
+                self._main_tick_fault_since = 0.0
+                self._main_tick_fault_last_log = 0.0
 
         return eventtime + MAIN_TICK_INTERVAL
+
+    def _note_main_tick_fault(self, eventtime):
+        """Zaehlt, protokolliert gedrosselt und eskaliert bei Dauerfehler.
+
+        Muss aus dem except-Block von _main_tick gerufen werden
+        (logging.exception braucht die aktive Ausnahme fuer den Traceback).
+
+        Warum ueberhaupt eskalieren und nicht nur drosseln: im Tick haengen
+        die HALL1-Prioritaet, die Safety-Timeouts, der verzoegerte
+        Motor-Disable und die Nachlauf-Streams. Ein dauerhaft scheiternder
+        Tick heisst also, dass die Aufsicht ausfaellt, waehrend der
+        Flush-Pfad weiter foerdert — es wird weiter Filament geschoben,
+        ohne dass noch jemand auf HALL1-Ueberlauf eskaliert.
+
+        siehe tests/test_main_tick_fault_throttle.py
+        """
+        self._main_tick_fault_count += 1
+        count = self._main_tick_fault_count
+        if count == 1:
+            self._main_tick_fault_since = eventtime
+            self._main_tick_fault_last_log = eventtime
+            logging.exception("buffer_feeder main_tick error (#1)")
+        elif count <= MAIN_TICK_FAULT_LOG_BURST:
+            logging.exception("buffer_feeder main_tick error (#%d)", count)
+        elif (eventtime - self._main_tick_fault_last_log
+                >= MAIN_TICK_FAULT_LOG_INTERVAL_S):
+            self._main_tick_fault_last_log = eventtime
+            logging.exception(
+                "buffer_feeder main_tick error (#%d, haelt seit %.1fs an)",
+                count, eventtime - self._main_tick_fault_since)
+
+        if (eventtime - self._main_tick_fault_since >= MAIN_TICK_FAULT_SECONDS
+                and not self._jam_active):
+            # Eigenes try: ist der Feeder-Zustand kaputt, kann auch
+            # _trigger_jam werfen — das darf den Tick nicht mitreissen.
+            try:
+                self._trigger_jam(
+                    "TICK_FAULT",
+                    "Reactor-Tick scheitert seit %.1fs ununterbrochen "
+                    "(%d Ticks) — Aufsicht ausgefallen, Druck wird pausiert"
+                    % (eventtime - self._main_tick_fault_since, count))
+            except Exception:
+                logging.exception(
+                    "buffer_feeder: Eskalation des Tick-Dauerfehlers "
+                    "fehlgeschlagen")
 
 
     def _tick_velocity_observation(self, eventtime):

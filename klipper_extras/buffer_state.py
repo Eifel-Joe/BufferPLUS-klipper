@@ -78,6 +78,14 @@ class BufferRuntimeState:
     # jeder Recovery-Pfad die Serie neu beginnen laesst.
     _flush_fault_count: int = 0
     _flush_fault_pending: str = ""
+    # Fangnetz im 50-Hz-Tick (Audit-Befund M2). _main_tick_fault_count zaehlt
+    # Ticks in FOLGE; _main_tick_fault_since traegt den Beginn der Serie fuer
+    # die zeitbasierte Eskalation, _main_tick_fault_last_log drosselt die
+    # Logausgabe. Ein erfolgreicher Tick setzt alle drei zurueck, ebenso
+    # FaultManager.clear_recovery_flags.
+    _main_tick_fault_count: int = 0
+    _main_tick_fault_since: float = 0.0
+    _main_tick_fault_last_log: float = 0.0
     _hall1_active_since: Optional[float] = None
     _last_metrics_log_time: float = 0.0
     _modulator_feeding: bool = False
