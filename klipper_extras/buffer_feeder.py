@@ -2091,6 +2091,12 @@ class BufferFeeder:
         self._continuous_feed = False
         self._continuous_feed_direction = 0
         self._continuous_feed_speed = 0.0
+        # Audit-Befund M4: der fuer die Diagnostik gemerkte Soll-Wert gilt nur
+        # fuer die beendete Foerdersitzung. Ohne Reset zeigte die Metrik-Zeile
+        # nach Druckende stundenlang die letzte Foerder-Geschwindigkeit,
+        # obwohl der Buffer still steht.
+        # siehe tests/test_metrics_no_side_effects.py
+        self._last_target_speed = 0.0
         # Clear the Schmitt-trigger latch on every hard stop so the
         # next AUTO session re-arms from live sensor/tracker state,
         # not from a stale "was feeding" hysteresis decision.

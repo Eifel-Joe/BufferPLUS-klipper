@@ -78,6 +78,9 @@ class StreamingCoordinator:
                 and owner._pending_direction > 0
                 and not owner._park_full_active):
             modulated = owner._compute_target_feed_speed()
+            # Wirksamen Wert festhalten — die Diagnostik liest ihn, statt den
+            # Regler selbst zu rufen (Audit-Befund M4).
+            owner._last_target_speed = modulated
             if modulated <= 0.0:
                 # HALL1 active mid-chunk — beende Pending-Stream.
                 # (_abort_signalled greift bereits weiter oben, aber
@@ -139,6 +142,10 @@ class StreamingCoordinator:
         """
         owner = self.owner
         target_speed = owner._compute_target_feed_speed()
+        # Wirksamen Wert festhalten — die Diagnostik liest ihn, statt den
+        # Regler selbst zu rufen (Audit-Befund M4). Auch die Null gehoert
+        # dazu: "keine Nachfrage" ist eine echte Entscheidung.
+        owner._last_target_speed = target_speed
         if target_speed <= 0.0:
             owner._debug_event(
                 'flush_no_demand',

@@ -37,7 +37,20 @@ class BufferDiagnostics:
         owner = self.owner
         if owner.buffer_debug_metrics:
             if (eventtime - owner._last_metrics_log_time) >= 1.0:
-                target_speed = owner._compute_target_feed_speed()
+                # Audit-Befund M4: hier stand `owner._compute_target_feed_speed()`.
+                # Der Regler ist kein reiner Rechner — er setzt den
+                # Schmitt-Latch _modulator_feeding, armt den High-Flow-Carry
+                # und setzt oder loescht den Post-Full-Clamp samt Dwell-Uhr.
+                # Der Aufruf lief einmal pro Sekunde in JEDEM Zustand, auch
+                # wenn der Flush-Pfad gar nicht arbeitete (IDLE, LOAD, SYNC),
+                # und verschob damit die Hysterese-Entscheidung des naechsten
+                # echten Flushes. Eine Messung darf das Gemessene nicht
+                # veraendern — zumal buffer_debug_metrics in der
+                # mitgelieferten lll.cfg eingeschaltet ist.
+                # Jetzt wird der zuletzt WIRKSAM berechnete Wert gelesen, den
+                # die produktiven Aufrufer in buffer_streaming.py ablegen.
+                # siehe tests/test_metrics_no_side_effects.py
+                target_speed = owner._last_target_speed
                 flow = owner.velocity_tracker.get_volumetric_flow()
                 hall1_persist_info = (
                     "%.2fs" % (owner.reactor.monotonic()

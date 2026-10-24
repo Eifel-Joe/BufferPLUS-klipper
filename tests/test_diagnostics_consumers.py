@@ -111,8 +111,18 @@ def test_metrics_preserve_getter_order_and_live_controller_effects(
         assert trace == []
         feeder._tick_debug_metrics(10.0)
         feeder._tick_debug_metrics(10.999)
-    assert trace == ['compute', 'clock', 'flow', 'clock', 'velocity', 'ready']
-    assert feeder._post_full_bias_clamp is True
+    # Audit-Befund M4 (bewusste Verhaltensaenderung): die Diagnostik ruft den
+    # Regler NICHT mehr. Der Charakterisierungs-Test aus der Extraktion hielt
+    # hier den Nebeneffekt fest ('compute' in der Reihenfolge, armierter
+    # Post-Full-Clamp). Beides war der Defekt: eine Messung, die das Gemessene
+    # veraendert. Die Reihenfolge der uebrigen Getter bleibt gepinnt, die
+    # Clamp-Zusicherung ist umgedreht und sichert jetzt die Abwesenheit des
+    # Nebeneffekts. siehe tests/test_metrics_no_side_effects.py
+    # Es entfallen zwei Eintraege: 'compute' selbst und die Uhrabfrage, die der
+    # Regler intern machte (_compute_target_feed_speed liest reactor.monotonic
+    # fuer seine Dwell- und Carry-Fenster).
+    assert trace == ['flow', 'clock', 'velocity', 'ready']
+    assert feeder._post_full_bias_clamp is False
     assert feeder._last_metrics_log_time == 10.0
     records = [r for r in caplog.records if 'buffer_metrics:' in r.getMessage()]
     assert [r.getMessage() for r in records] == [

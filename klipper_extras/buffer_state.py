@@ -91,6 +91,12 @@ class BufferRuntimeState:
     # mcu-Zeitstempel des Eintritts. _p778_ticks zaehlt die Ticks im
     # Zustand, _p778_last_log_time drosselt das Lebenszeichen auf ein
     # idle_anchor_gap-Fenster.
+    # Zuletzt WIRKSAM berechnete Soll-Geschwindigkeit (Audit-Befund M4).
+    # Gesetzt nur von den produktiven Aufrufern in buffer_streaming.py; die
+    # Diagnostik liest sie, statt _compute_target_feed_speed selbst zu rufen.
+    # Der Regler ist kein reiner Rechner (Schmitt-Latch, High-Flow-Carry,
+    # Post-Full-Clamp), eine Messung darf das Gemessene nicht veraendern.
+    _last_target_speed: float = 0.0
     _p778_since: float = 0.0
     _p778_ticks: int = 0
     _p778_last_log_time: float = 0.0
