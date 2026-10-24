@@ -2022,13 +2022,9 @@ class BufferFeeder:
                 "buffer_feeder: forced_t0 clamped — was %.2fs "
                 "ahead of mcu_now (far-future flush guard)",
                 forced_t0 - mcu_now)
-        if plan.skip_reason == "far_future_toolhead_anchor":
-            logging.warning(
-                "buffer_feeder: anchor skipped — th_time %.2fs "
-                "ahead, would corrupt last_step_clock "
-                "(th_time=%.3f lme=%.3f en=%.3f mcu_now=%.3f)",
-                plan.skipped_t0 - mcu_now, plan.toolhead_time,
-                self._last_move_end_time, plan.enable_floor, mcu_now)
+        # Audit-Befund N3: hier stand dieselbe Warnung ein zweites Mal.
+        # _compute_t0_anchor loggt sie fuer denselben Plan; der Planer
+        # bleibt still, sonst erscheint jeder Skip doppelt im Log.
         return plan
 
     def _compute_t0_anchor(self, forced_t0, mcu_now,
