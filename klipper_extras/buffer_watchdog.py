@@ -15,6 +15,63 @@ class IdleWatchdogCoordinator:
             owner._idle_watchdog_print_activity(eventtime))
         hall_empty_block = (owner.hall_empty
                             and not owner.use_flush_callback_bang_bang)
+        # Der P7-78-Override ist der einzige Pfad, der _print_active von
+        # True auf False dreht. Der ungefaelschte Druckzustand ist damit
+        # `_print_active or _p778_override` — ohne die Signatur von
+        # _idle_watchdog_print_activity zu aendern.
+        _print_active_raw = _print_active or _p778_override
+        # Silent-Idle-Disable, eigenstaendig. Vorher hing er im
+        # Anchor-Gate unten und war damit auf `not _print_active`
+        # angewiesen. Waehrend eines laufenden Drucks ist das nur
+        # erfuellbar, wenn der P7-78-Override _print_active
+        # zurueckgesetzt hat — der Override war also der einzige
+        # Tueroeffner fuer eine Aktion, die mit Anchor-Bewegung nichts
+        # zu tun hat. Folge: blieb der Flush-Callback nicht aus
+        # (Override greift nicht), blieb der Motor waehrend des ganzen
+        # Drucks bestromt, obwohl der Buffer still stand — genau das,
+        # wogegen idle_motor_disable eingefuehrt wurde (User-Report
+        # 2026-07-13: Motor kochend heiss im Standby).
+        #
+        # Der Disable braucht die Sicherheitsbedingungen des Gates, die
+        # eine Bewegung betreffen (kein in-flight-Move, keine
+        # Extruder-Kopplung, kein anstehender Disable, keine
+        # pending-Chunks, kein Continuous-Feed), aber NICHT
+        # `not _print_active`: er soll gerade dann greifen, wenn
+        # gedruckt wird und der Buffer ruht. Er erzeugt keine Steps,
+        # kann also auch keine Sequenz stoeren.
+        #
+        # Im Zustand AUTO bleibt der Druck-Ausschluss erhalten: dort ist
+        # der Buffer aktiv am Foerdern, ein Disable mitten im Druck
+        # waere riskant. Nur STATE_IDLE schaltet unbedingt ab (Spec:
+        # stopped AND disabled) — und genau dieser Pfad war vorher auf
+        # den Override angewiesen.
+        #
+        # hall_full_block/hall_empty_block bewusst NICHT geprueft: beide
+        # gaten Anchor-BEWEGUNGEN. Ein voller Buffer ist sogar der
+        # Normalfall, in dem abgeschaltet werden soll.
+        # siehe tests/test_silent_idle_disable_gate.py
+        if (owner.idle_anchor_mode == 'silent'
+                and not owner._silent_idle_disabled
+                and owner._state in (STATE_IDLE, STATE_AUTO)
+                and not owner._stepper_synced_to
+                and not owner._pending_disable
+                and not owner._move_in_flight()
+                and owner._pending_remaining_mm == 0.0
+                and not owner._continuous_feed
+                and (owner._state == STATE_IDLE
+                     or (not _print_active_raw
+                         and _print_state_known
+                         and owner.idle_motor_disable))):
+            _mcu_sd = owner.stepper.get_mcu().estimated_print_time(
+                owner.reactor.monotonic())
+            _gap_sd = _mcu_sd - owner._last_move_end_time
+            if _gap_sd > owner.idle_anchor_gap:
+                owner._silent_idle_disabled = True
+                owner._schedule_stepper_disable()
+                logging.info(
+                    "buffer_feeder: silent idle-disable "
+                    "(state=%s gap=%.1fs, no anchor move)",
+                    owner._state.lower(), _gap_sd)
         # hall_full blockt nur noch Weg-1-Anchors (enabled: ~18mm/h
         # Drift Richtung HALL1, Codex-Verify) und den P7-78-Print-
         # Override (submittet ebenfalls enabled). Bei Weg 2
@@ -60,20 +117,9 @@ class IdleWatchdogCoordinator:
             # bleibt nur der Idle-Motor-Disable als One-shot
             # (Latch, re-armed in _enable_stepper — sonst wuerde
             # jeder Tick _last_enable_schedule_time fortschieben).
-            if (owner.idle_anchor_mode == 'silent'
-                    and gap_moves > owner.idle_anchor_gap
-                    and not owner._silent_idle_disabled
-                    and (owner._state == STATE_IDLE
-                         or (owner._state == STATE_AUTO
-                             and not _p778_override
-                             and _print_state_known
-                             and owner.idle_motor_disable))):
-                owner._silent_idle_disabled = True
-                owner._schedule_stepper_disable()
-                logging.info(
-                    "buffer_feeder: silent idle-disable "
-                    "(state=%s gap=%.1fs, no anchor move)",
-                    owner._state.lower(), gap_moves)
+            # Der Silent-Idle-Disable stand frueher hier und haengt jetzt
+            # eigenstaendig oben im Tick — er braucht `not _print_active`
+            # nicht und darf nicht laenger davon abhaengen.
             if (owner.idle_anchor_mode != 'silent'
                     and gap_moves > owner.idle_anchor_gap
                     and gap_anchors > owner.idle_anchor_gap):
@@ -272,13 +318,59 @@ class IdleWatchdogCoordinator:
             _flush_silence = (
                 _mcu_now_p778 - owner._last_mcu_flush_time)
             if _flush_silence > owner.idle_anchor_gap:
-                logging.info(
-                    "buffer_feeder: print-block stale override "
-                    "(flush silent for %.1fs > %.1fs threshold, "
-                    "P7-78)",
-                    _flush_silence, owner.idle_anchor_gap)
+                # P7-78-Logflut (Issue #59): Die Zeile stand hier
+                # ungedrosselt und feuerte mit der Tick-Rate
+                # (MAIN_TICK_INTERVAL 0.02 = 50 Hz). Im Testdruck
+                # 2026-09-09: 124678 von 223677 Logzeilen. Wurzel: der
+                # Zustand laesst sich nur durch einen echten
+                # Flush-Callback aufloesen (_on_mcu_flush ist der
+                # einzige Schreiber von _last_mcu_flush_time), im
+                # Silent-Modus ist darunter aber keine Aktion
+                # erreichbar, die einen Flush ausloest — die Bedingung
+                # bleibt also beliebig lange stehen.
+                # Jetzt flankengetriggert: Eintritt, Lebenszeichen pro
+                # idle_anchor_gap-Fenster, Austritt mit Gesamtdauer und
+                # Tickzahl. Die beiden letzten Groessen gab es vorher
+                # gar nicht.
+                # NICHT auf _debug_event umstellen: die Meldung waere
+                # ohne buffer_debug_events unsichtbar, also genau dann,
+                # wenn ein Crash-Log ausgewertet wird.
+                # siehe tests/test_p778_log_throttle.py
+                if not owner._p778_since:
+                    owner._p778_since = _mcu_now_p778
+                    owner._p778_ticks = 0
+                    owner._p778_last_log_time = _mcu_now_p778
+                    logging.info(
+                        "buffer_feeder: print-block stale override "
+                        "armed (flush silent for %.1fs > %.1fs "
+                        "threshold, P7-78)",
+                        _flush_silence, owner.idle_anchor_gap)
+                elif (_mcu_now_p778 - owner._p778_last_log_time
+                        > owner.idle_anchor_gap):
+                    owner._p778_last_log_time = _mcu_now_p778
+                    logging.info(
+                        "buffer_feeder: print-block stale override "
+                        "still active (flush silent for %.1fs, "
+                        "P7-78)",
+                        _flush_silence)
+                owner._p778_ticks += 1
                 _print_active = False
                 _p778_override = True
+
+        # Austrittsflanke: der Zustand war aktiv und ist es nicht mehr.
+        # Steht bewusst ausserhalb der _print_active-Pruefung oben — der
+        # Override endet auch dadurch, dass der Druck endet, nicht nur
+        # durch einen Flush.
+        if owner._p778_since and not _p778_override:
+            _mcu_exit = owner.stepper.get_mcu().estimated_print_time(
+                owner.reactor.monotonic())
+            logging.info(
+                "buffer_feeder: print-block stale override cleared "
+                "(duration=%.1fs ticks=%d, P7-78)",
+                _mcu_exit - owner._p778_since, owner._p778_ticks)
+            owner._p778_since = 0.0
+            owner._p778_ticks = 0
+            owner._p778_last_log_time = 0.0
         return _print_active, _print_state_known, _p778_override
 
     def _submit_idle_watchdog_anchor(
