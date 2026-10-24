@@ -69,6 +69,15 @@ class BufferRuntimeState:
     # _disable_stepper erneut rufen und _last_enable_schedule_time
     # fortschieben. Re-armed in _enable_stepper.
     _silent_idle_disabled: bool = False
+    # Fangnetz um den Flush-Callback.
+    # _flush_fault_count zaehlt Ausnahmen in FOLGE; ein erfolgreicher Flush
+    # setzt ihn zurueck. _flush_fault_pending traegt die Begruendung vom
+    # Callback zum _main_tick, der daraus den Jam ausloest (der Callback
+    # selbst darf das nicht, er laeuft unter reactor.assert_no_pause()).
+    # Beide werden in FaultManager.clear_recovery_flags geraeumt, damit
+    # jeder Recovery-Pfad die Serie neu beginnen laesst.
+    _flush_fault_count: int = 0
+    _flush_fault_pending: str = ""
     _hall1_active_since: Optional[float] = None
     _last_metrics_log_time: float = 0.0
     _modulator_feeding: bool = False

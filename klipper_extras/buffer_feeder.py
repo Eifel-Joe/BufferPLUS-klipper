@@ -76,6 +76,20 @@ from .buffer_types import AnchorPlan, CleanupOptions, Hall1Context
 
 DEFAULT_BENCHMARK_MODE_S = 900.0
 
+# Schwellen des Flush-Fangnetzes (siehe _on_mcu_flush).
+# FLUSH_FAULT_LIMIT — Fehler in Folge, bevor der Druck pausiert wird.
+# Der Callback laeuft rund 4-5x/s (motion_queuing: BGFLUSH_SG_HIGH_TIME
+# minus BGFLUSH_SG_LOW_TIME = 0.25s im Druck, BGFLUSH_HIGH_TIME minus
+# BGFLUSH_LOW_TIME = 0.20s im Hintergrund), die Schwelle ist also nach
+# deutlich unter einer Sekunde erreicht und verzoegert die Reaktion auf
+# einen Dauerfehler nicht nennenswert. Sie existiert nur, damit ein
+# einzelner Aussetzer keinen Druck abbricht.
+# LOG_BURST/LOG_EVERY — Drosselung gegen das P7-78-Muster (Issue #59):
+# ohne sie erzeugte ein Dauerfehler 4-5 Tracebacks pro Sekunde.
+FLUSH_FAULT_LIMIT = 3
+FLUSH_FAULT_LOG_BURST = 3
+FLUSH_FAULT_LOG_EVERY = 25
+
 
 class BufferFeeder:
     # Klipper-facing adapter and owner of live config/runtime attributes.
@@ -988,6 +1002,17 @@ class BufferFeeder:
             if not self._startup_grace_done:
                 return eventtime + MAIN_TICK_INTERVAL
 
+            # Eskalation eines Dauerfehlers im Flush-Pfad. Sie gehoert
+            # hierher und nicht in den Callback: der laeuft unter
+            # reactor.assert_no_pause(), _trigger_jam meldet aber ueber
+            # den GCode-Kanal und registriert einen Timer fuer
+            # jam_action. Verzoegerung: ein Tick (20 ms).
+            # siehe _on_mcu_flush, tests/test_flush_fault_guard.py
+            if self._flush_fault_pending:
+                reason = self._flush_fault_pending
+                self._flush_fault_pending = ""
+                self._trigger_jam("FLUSH_FAULT", reason)
+
             self._tick_message_latches(eventtime)
 
             if self._tick_hall1_priority(eventtime):
@@ -1394,6 +1419,62 @@ class BufferFeeder:
             snapshot, settings, recovery_time=self.reactor.monotonic)
 
     def _on_mcu_flush(self, flush_time, step_gen_time):
+        """Fangnetz um den Flush-Pfad.
+
+        Klippers motion_queuing ruft die Flush-Callbacks ungeschuetzt auf
+        (`_advance_flush_time`, innerhalb von `reactor.assert_no_pause()`).
+        Faengt `_flush_handler` eine Ausnahme, ruft er
+        `invoke_shutdown("Exception in flush_handler")` und stellt den
+        Flush-Timer ab — eine einzige Ausnahme hier beendet den Druck per
+        Not-Aus. Derselbe Fehler im Reactor-Tick wird von `_main_tick`
+        geschluckt; diese Einstiegsstelle war die letzte ohne Netz.
+
+        Ein einzelner Aussetzer wird geschluckt, der naechste Flush
+        foerdert normal weiter. Erst FLUSH_FAULT_LIMIT Fehler in FOLGE
+        gelten als Dauerfehler und pausieren den Druck ueber den
+        vorhandenen Jam-Weg (`_trigger_jam` -> `jam_action`), damit die
+        Entsperrung der gewohnte BUFFER_CLEAR_JAM bleibt.
+
+        WARUM NICHT nur die Foerderung stilllegen: ein Buffer, der nicht
+        mehr foerdert, zwingt den Extruder, das Filament direkt von der
+        Spule zu ziehen. Bei dem kurzen Armweg der Mellow LLL Plus ist
+        Unterextrusion dann keine Moeglichkeit, sondern die Folge.
+
+        Die Eskalation selbst laeuft NICHT hier, sondern in `_main_tick`:
+        der Callback steht unter `assert_no_pause()`, und `_trigger_jam`
+        meldet ueber den GCode-Kanal und registriert einen Timer. Hier
+        wird nur gezaehlt, gedrosselt protokolliert und vorgemerkt.
+
+        siehe tests/test_flush_fault_guard.py
+        """
+        try:
+            self._handle_mcu_flush(flush_time, step_gen_time)
+        except Exception as exc:
+            self._note_flush_fault(exc)
+        else:
+            # Erfolgreicher Flush beendet eine Fehlerserie. Nur Fehler in
+            # FOLGE eskalieren — ein Aussetzer alle paar Minuten ist kein
+            # Dauerfehler.
+            self._flush_fault_count = 0
+
+    def _note_flush_fault(self, exc):
+        """Zaehlt, protokolliert gedrosselt und merkt die Eskalation vor.
+
+        Muss aus einem except-Block gerufen werden (logging.exception
+        braucht die aktive Ausnahme fuer den Traceback)."""
+        self._flush_fault_count += 1
+        count = self._flush_fault_count
+        if count <= FLUSH_FAULT_LOG_BURST or count % FLUSH_FAULT_LOG_EVERY == 0:
+            logging.exception(
+                "buffer_feeder: flush callback fault #%d (state=%s)",
+                count, self._state)
+        if count >= FLUSH_FAULT_LIMIT and not self._flush_fault_pending:
+            self._flush_fault_pending = (
+                "%d Fehler in Folge im Flush-Pfad (%s: %s) — Buffer foerdert "
+                "nicht mehr, Druck wird pausiert"
+                % (count, type(exc).__name__, exc))
+
+    def _handle_mcu_flush(self, flush_time, step_gen_time):
         """Flush-callback driven continuous-streaming submit.
 
         Klipper's motion_queuing module fires this synchronously inside
