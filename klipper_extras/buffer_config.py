@@ -1,3 +1,5 @@
+import logging
+
 from dataclasses import dataclass
 
 from .buffer_tuning import read_tuning_config
@@ -18,6 +20,23 @@ def _validated_idle_anchor_mode(config):
             "buffer_feeder: idle_anchor_mode must be 'move' or "
             "'silent' (got %r)" % (mode,))
     return mode
+
+
+def _read_dead_flush_chunk(config):
+    """Audit-Befund N1: flush_callback_chunk_mm wird von keinem Steuerpfad
+    benutzt — die Chunk-Groesse im Flush-Pfad bestimmt interrupt_chunk_mm
+    ueber _effective_interrupt_chunk_mm. Der Wert bleibt lesbar, damit
+    bestehende Configs gueltig bleiben (Klipper weist unbekannte Optionen
+    zurueck), aber wer ihn gesetzt hat, erfaehrt es einmal beim Start.
+    siehe tests/test_dead_tuning_parameter.py
+    """
+    gesetzt = config.getfloat('flush_callback_chunk_mm', None)
+    if gesetzt is not None:
+        logging.info(
+            "buffer_feeder: flush_callback_chunk_mm=%.3f ist ohne Wirkung — "
+            "die Chunk-Groesse im Flush-Pfad bestimmt interrupt_chunk_mm",
+            gesetzt)
+    return read_tuning_config(config, 'flush_callback_chunk_mm')
 
 
 @dataclass
@@ -145,8 +164,7 @@ class BufferConfigValues:
             hall_debounce_ms=config.getint('hall_debounce_ms', 50, minval=0),
             lead_time=read_tuning_config(config, 'lead_time'),
             max_move_chunk_mm=max_move_chunk_mm,
-            flush_callback_chunk_mm=read_tuning_config(
-                config, 'flush_callback_chunk_mm'),
+            flush_callback_chunk_mm=_read_dead_flush_chunk(config),
             interrupt_chunk_mm=interrupt_chunk_mm,
             max_feed_speed=max_feed_speed,
             hall1_persist_timeout=config.getfloat(

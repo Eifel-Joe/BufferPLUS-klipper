@@ -393,7 +393,13 @@ class FakeConfig:
         return self.values.get(key, default)
 
     def getfloat(self, key, default=None, **kwargs):
-        return float(self.values.get(key, default))
+        # Klipper-Treue: ConfigWrapper.getfloat gibt den Default unveraendert
+        # zurueck, wenn die Option fehlt. Vorher lief hier float(None) in einen
+        # TypeError, sodass sich "Option gesetzt?" nicht pruefen liess.
+        value = self.values.get(key, default)
+        if value is None:
+            return None
+        return float(value)
 
     def getint(self, key, default=None, **kwargs):
         return int(self.values.get(key, default))

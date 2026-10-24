@@ -15,6 +15,12 @@ class TuningParameter:
     precision: int = 3
     audit_gap: str = " "
     dump_width: int = 24
+    # Audit-Befund N1: Parameter, die gelesen und gesetzt werden koennen, aber
+    # von keinem Steuerpfad benutzt werden. Entfernen ginge nicht — Klipper
+    # weist unbekannte Config-Optionen zurueck, jede bestehende lll.cfg waere
+    # ungueltig. Stattdessen wird die Wirkungslosigkeit sichtbar gemacht.
+    # siehe tests/test_dead_tuning_parameter.py
+    no_effect_hint: str = ""
 
     def read_config(self, config):
         # Config booleans accept words; runtime flags accept only 0/1.
@@ -55,7 +61,9 @@ class TuningParameter:
 # These are config fallbacks, not the independently tuned lll.cfg profile.
 TUNING_PARAMETERS = (
     TuningParameter("CHUNK_MM", "flush_callback_chunk_mm", 15.0,
-                    unit="mm", status_key="flush_callback_chunk_mm", audit_gap="  "),
+                    unit="mm", status_key="flush_callback_chunk_mm", audit_gap="  ",
+                    no_effect_hint="ohne Wirkung — die Chunk-Groesse im "
+                                   "Flush-Pfad bestimmt interrupt_chunk_mm"),
     TuningParameter("SPEED", "feed_speed", 30.0,
                     unit="mm/s", status_key="feed_speed", audit_gap="  "),
     TuningParameter("ACCEL", "accel", 1000.0,
@@ -164,6 +172,11 @@ def apply_runtime_tuning(owner, gcmd):
         if attribute == "filament_diameter":
             owner.velocity_tracker.set_filament_diameter(value)
         gc.respond_info(parameter.audit(old, value))
+        if parameter.no_effect_hint:
+            # Audit-Befund N1: sonst sieht der Operator eine Bestaetigung und
+            # glaubt, er habe etwas getunt.
+            gc.respond_info("BUFFER_SET: %s ist %s"
+                            % (attribute, parameter.no_effect_hint))
         if attribute == "max_move_chunk_mm":
             _cap_existing_interrupt(owner, gc)
         elif attribute == "lead_time":
